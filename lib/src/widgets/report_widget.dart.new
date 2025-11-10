@@ -1,0 +1,703 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:frontend_flutter/firebase_options.dart';
+import 'package:frontend_flutter/src/services/company_service.dart';
+import 'package:frontend_flutter/src/services/report_service.dart';
+import 'package:frontend_flutter/src/services/export_service.dart';
+import 'package:frontend_flutter/src/services/invoice_service.dart';
+import 'package:intl/intl.dart';
+
+class ReportWidget extends StatefulWidget {
+  const ReportWidget({super.key});
+
+  @override
+  _ReportWidgetState createState() => _ReportWidgetState();
+}
+
+class _ReportWidgetState extends State<ReportWidget> {
+  late final ReportService _reportService;
+  late final CompanyService _companyService;
+  late final InvoiceService _invoiceService;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  Map<String, bool> _selectedCompanies = {};
+  Map<String, Set<String>> _selectedClients = {};
+  String _filterType = 'range';
+  DateTime? _startDate;
+  DateTime? _endDate;
+  DateTime? _editInvoiceDate;
+  DateTime? _editDueDate;
+  bool _includeDeletedCompanies = false;
+  bool _showTotal = false;
+  final TextEditingController _editAmountController = TextEditingController();
+  final TextEditingController _editInvoiceDateController = TextEditingController();
+  final TextEditingController _editDueDateController = TextEditingController();
+  final String _rangeType = 'invoiceDate';
+
+  Map<String, dynamic>? _reportResult;
+  bool _isLoading = false;
+  String? _selectedInvoiceDateFilter;
+  String? _selectedDueDateFilter;
+
+  @override
+  void initState() {
+    super.initState();
+    final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    _reportService = ReportService(projectId);
+    _companyService = CompanyService(projectId);
+    _invoiceService = InvoiceService(projectId);
+    
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _firestore
+            .collection('artifacts/$projectId/public/data/invoices')
+            .snapshots()
+            .listen((snapshot) {
+          if (mounted) {
+            setState(() {}); // Solo actualizar la UI
+          }
+        });
+
+        _firestore
+            .collection('artifacts/$projectId/public/data/companies')
+            .snapshots()
+            .listen((snapshot) {
+          if (mounted) {
+            setState(() {
+              _selectedCompanies.clear();
+            });
+          }
+        });
+      }
+    });
+  }
+
+  Future<void> _calculateReport() async {
+    if (_isLoading) return;
+    if (!mounted) return;
+
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    
+    setState(() {
+      _isLoading = true;
+      _showTotal = true;
+    });
+    
+    try {
+      final selectedCompanies = _selectedCompanies.entries
+          .where((e) => e.value)
+          .map((e) => e.key)
+          .toList();
+      
+      final clientFilters = <String, Set<String>>{};
+      for (final company in selectedCompanies) {
+        final selectedClientsForCompany = _selectedClients[company];
+        if (selectedClientsForCompany != null && selectedClientsForCompany.isNotEmpty) {
+          clientFilters[company] = selectedClientsForCompany;
+        }
+      }
+          
+      final reportData = await _reportService.calculateReport(
+        selectedCompanies: selectedCompanies,
+        selectedClients: clientFilters.isEmpty ? null : clientFilters,
+        filterType: _filterType,
+        startDate: _startDate?.toIso8601String().split('T').first,
+        endDate: _endDate?.toIso8601String().split('T').first,
+        rangeType: _rangeType,
+        selectedInvoiceDate: _selectedInvoiceDateFilter,
+        selectedDueDate: _selectedDueDateFilter,
+        includeDeletedCompanies: _includeDeletedCompanies,
+      );
+      
+      if (!mounted) return;
+      setState(() {
+        _reportResult = reportData;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _showTotal = false;
+      });
+      scaffoldMessenger.showSnackBar(
+        SnackBar(content: Text('Error al calcular el reporte: $e')),
+      );
+    }
+  }
+
+  Widget _buildResults() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_reportResult == null) {
+      return const Center(child: Text('No hay datos disponibles'));
+    }
+
+    final totalSum = _reportResult?['totalSum'] as double? ?? 0.0;
+    final invoiceCount = _reportResult?['invoiceCount'] as int? ?? 0;
+    final invoices = _reportResult?['invoices'] as List<dynamic>? ?? <dynamic>[];
+    final sumByCompany = 
+        (_reportResult?['sumByCompany'] as Map<String, dynamic>?) ?? {};
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24.0),
+      decoration: BoxDecoration(
+        color: Colors.teal.shade50,
+        borderRadius: BorderRadius.circular(8.0),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Text(
+                'Total para la selección ($invoiceCount facturas)',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (_showTotal && !_isLoading && _reportResult != null) Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.grey.withOpacity(0.2),
+                    spreadRadius: 1,
+                    blurRadius: 2,
+                    offset: const Offset(0, 1),
+                  ),
+                ],
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Total:', style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                        '${totalSum.toStringAsFixed(2)} €',
+                        style: TextStyle(
+                          color: Colors.teal.shade700,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 20,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            if (sumByCompany.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Divider(),
+              Text('Desglose por empresa:', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              ...sumByCompany.entries.map((e) => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(child: Text(e.key)),
+                        Text(
+                          '${(e.value['total'] as double).toStringAsFixed(2)} €',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(),
+                ],
+              )),
+            ],
+            if (invoices.isNotEmpty) ...[
+              const SizedBox(height: 18),
+              Text('Historial de facturas', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: DataTable(
+                  columns: const [
+                    DataColumn(label: Text('Empresa')),
+                    DataColumn(label: Text('Base')),
+                    DataColumn(label: Text('IVA')),
+                    DataColumn(label: Text('RE')),
+                    DataColumn(label: Text('Total')),
+                    DataColumn(label: Text('Fecha factura')),
+                    DataColumn(label: Text('Fecha vencimiento')),
+                    DataColumn(label: Text('Acciones')),
+                  ],
+                  rows: invoices.map((inv) {
+                    final company = inv['company']?.toString() ?? '';
+                    final baseAmount = (inv['baseAmount'] as num?)?.toDouble() ?? 0.0;
+                    final ivaAmount = (inv['iva'] as num?)?.toDouble() ?? 0.0;
+                    final reAmount = (inv['re'] as num?)?.toDouble() ?? 0.0;
+                    final amount = (inv['amount'] as num?)?.toDouble() ?? (baseAmount + ivaAmount + reAmount);
+                    final invoiceDate = inv['invoiceDate']?.toString() ?? '';
+                    final dueDate = inv['dueDate']?.toString() ?? '';
+                    return DataRow(
+                      cells: [
+                        DataCell(Text(company)),
+                        DataCell(Text('${baseAmount.toStringAsFixed(2)} €')),
+                        DataCell(Text('${ivaAmount.toStringAsFixed(2)} €')),
+                        DataCell(Text('${reAmount.toStringAsFixed(2)} €')),
+                        DataCell(Text('${amount.toStringAsFixed(2)} €')),
+                        DataCell(Text(invoiceDate)),
+                        DataCell(Text(dueDate)),
+                        DataCell(Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (_auth.currentUser != null) ...[
+                              IconButton(
+                                icon: const Icon(Icons.edit, size: 20),
+                                onPressed: () => _showEditInvoiceDialog(inv),
+                                tooltip: 'Editar factura',
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete, size: 20, color: Colors.red),
+                                onPressed: () => _showDeleteConfirmationDialog(inv),
+                                tooltip: 'Eliminar factura',
+                              ),
+                            ],
+                          ],
+                        )),
+                      ],
+                    );
+                  }).toList(),
+                ),
+              ),
+            ] else
+              const Text('No hay facturas para los filtros seleccionados.'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDateRangePicker() {
+    return Row(
+      children: [
+        Expanded(
+          child: InkWell(
+            onTap: () => _selectDate(context, true),
+            child: InputDecorator(
+              decoration: const InputDecoration(labelText: 'Fecha de inicio'),
+              child: Text(_startDate != null ? DateFormat('yyyy-MM-dd').format(_startDate!) : 'No seleccionada'),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: InkWell(
+            onTap: () => _selectDate(context, false),
+            child: InputDecorator(
+              decoration: const InputDecoration(labelText: 'Fecha de fin'),
+              child: Text(_endDate != null ? DateFormat('yyyy-MM-dd').format(_endDate!) : 'No seleccionada'),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCompanySelector() {
+    return StreamBuilder<QuerySnapshot>(
+      stream: _companyService.getCompaniesStream(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+        var companies = snapshot.data!.docs;
+        if (_selectedCompanies.isEmpty && companies.isNotEmpty) {
+          _selectedCompanies = { for (var item in companies) item['name'] : false };
+          _selectedClients = { for (var item in companies) item['name'] : {} };
+        }
+        
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Empresas:', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8.0,
+                  runSpacing: 4.0,
+                  children: [
+                    FilterChip(
+                      label: const Text('Todas'),
+                      selected: _selectedCompanies.values.isNotEmpty && 
+                               _selectedCompanies.values.every((v) => v == true),
+                      onSelected: (val) {
+                        setState(() {
+                          _selectedCompanies.updateAll((key, old) => val);
+                          if (!val) {
+                            _selectedClients.values.forEach((clients) => clients.clear());
+                          }
+                          _showTotal = false;
+                        });
+                      },
+                    ),
+                    ..._selectedCompanies.keys.map((company) {
+                      return Padding(
+                        padding: const EdgeInsets.only(left: 6.0),
+                        child: FilterChip(
+                          label: Text(company),
+                          selected: _selectedCompanies[company]!,
+                          onSelected: (value) {
+                            setState(() {
+                              _selectedCompanies[company] = value;
+                              if (!value) {
+                                _selectedClients[company]?.clear();
+                              }
+                              _showTotal = false;
+                            });
+                          },
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ],
+            ),
+            
+            ..._selectedCompanies.entries.where((e) => e.value).map((entry) {
+              final company = entry.key;
+              return Padding(
+                padding: const EdgeInsets.only(top: 16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Clientes de $company:', 
+                         style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 8),
+                    StreamBuilder<QuerySnapshot>(
+                      stream: _companyService.getClientsStream(company),
+                      builder: (context, snapshot) {
+                        if (snapshot.hasError) {
+                          return Text('Error: ${snapshot.error}');
+                        }
+                        if (!snapshot.hasData) {
+                          return const SizedBox(
+                            height: 32,
+                            child: Center(child: CircularProgressIndicator()),
+                          );
+                        }
+
+                        final clients = snapshot.data!.docs
+                            .map((doc) => (doc.data() as Map<String, dynamic>)['name'] as String)
+                            .where((name) => name.isNotEmpty)
+                            .toSet();
+
+                        if (clients.isEmpty) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 8.0),
+                            child: Text('No hay clientes registrados'),
+                          );
+                        }
+
+                        return Wrap(
+                          spacing: 8.0,
+                          runSpacing: 4.0,
+                          children: [
+                            FilterChip(
+                              label: const Text('Todos'),
+                              selected: _selectedClients[company]!.isEmpty ||
+                                       _selectedClients[company]!.containsAll(clients),
+                              onSelected: (value) {
+                                setState(() {
+                                  if (value) {
+                                    _selectedClients[company] = clients;
+                                  } else {
+                                    _selectedClients[company]?.clear();
+                                  }
+                                  _showTotal = false;
+                                });
+                              },
+                            ),
+                            ...clients.map((client) {
+                              return FilterChip(
+                                label: Text(client),
+                                selected: _selectedClients[company]?.contains(client) ?? false,
+                                onSelected: (value) {
+                                  setState(() {
+                                    if (value) {
+                                      _selectedClients[company]?.add(client);
+                                    } else {
+                                      _selectedClients[company]?.remove(client);
+                                    }
+                                    _showTotal = false;
+                                  });
+                                },
+                              );
+                            }),
+                          ],
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      child: Container(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Reporte Acumulado', style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 20),
+            _buildFilters(),
+            const SizedBox(height: 20),
+            _buildResults(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilters() {
+    return Container(
+      padding: const EdgeInsets.all(16.0),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(8.0),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Filtros', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 10),
+          _buildCompanySelector(),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              const Text('Modo de filtro: '),
+              const SizedBox(width: 8),
+              DropdownButton<String>(
+                value: _filterType,
+                items: const [
+                  DropdownMenuItem(value: 'range', child: Text('Rango de fechas')),
+                  DropdownMenuItem(value: 'invoiceDate', child: Text('Fecha de factura')),
+                  DropdownMenuItem(value: 'dueDate', child: Text('Fecha de vencimiento')),
+                ],
+                onChanged: (val) {
+                  setState(() {
+                    _filterType = val ?? 'range';
+                    if (_filterType != 'invoiceDate') _selectedInvoiceDateFilter = null;
+                    if (_filterType != 'dueDate') _selectedDueDateFilter = null;
+                    _showTotal = false;
+                  });
+                },
+              ),
+            ],
+          ),
+
+          if (_filterType == 'range') ...[
+            const SizedBox(height: 12),
+            _buildDateRangePicker(),
+          ] else if (_filterType == 'invoiceDate') ...[
+            const SizedBox(height: 12),
+            Builder(builder: (context) {
+              final raw = (_reportResult?['uniqueInvoiceDates'] as List<dynamic>?)
+                      ?.map((e) => e.toString())
+                      .toList() ?? <String>[];
+              final invoiceDateOptions = raw.toSet().toList()..sort();
+
+              if (invoiceDateOptions.isEmpty) {
+                return const InputDecorator(
+                  decoration: InputDecoration(labelText: 'Fecha factura'),
+                  child: Text('No hay fechas de factura disponibles'),
+                );
+              }
+
+              final hasSelected = _selectedInvoiceDateFilter != null && invoiceDateOptions.contains(_selectedInvoiceDateFilter);
+              final effectiveValue = hasSelected ? _selectedInvoiceDateFilter : '';
+
+              final items = <DropdownMenuItem<String>>[
+                const DropdownMenuItem(value: '', child: Text('Todas')),
+                ...invoiceDateOptions.map((d) => DropdownMenuItem(value: d, child: Text(d))),
+              ];
+
+              return DropdownButtonFormField<String>(
+                initialValue: effectiveValue,
+                hint: const Text('Filtrar por Fecha factura'),
+                items: items,
+                onChanged: (val) {
+                  setState(() {
+                    _selectedInvoiceDateFilter = (val == null || val.isEmpty) ? null : val;
+                    _showTotal = false;
+                  });
+                },
+              );
+            }),
+          ] else if (_filterType == 'dueDate') ...[
+            const SizedBox(height: 12),
+            Builder(builder: (context) {
+              final raw = (_reportResult?['uniqueDueDates'] as List<dynamic>?)
+                      ?.map((e) => e.toString())
+                      .toList() ?? <String>[];
+              final dueDateOptions = raw.toSet().toList()..sort();
+
+              if (dueDateOptions.isEmpty) {
+                return const InputDecorator(
+                  decoration: InputDecoration(labelText: 'Fecha vencimiento'),
+                  child: Text('No hay fechas de vencimiento disponibles'),
+                );
+              }
+
+              final hasSelected = _selectedDueDateFilter != null && dueDateOptions.contains(_selectedDueDateFilter);
+              final effectiveValue = hasSelected ? _selectedDueDateFilter : '';
+
+              final items = <DropdownMenuItem<String>>[
+                const DropdownMenuItem(value: '', child: Text('Todas')),
+                ...dueDateOptions.map((d) => DropdownMenuItem(value: d, child: Text(d))),
+              ];
+
+              return DropdownButtonFormField<String>(
+                initialValue: effectiveValue,
+                hint: const Text('Filtrar por Fecha vencimiento'),
+                items: items,
+                onChanged: (val) {
+                  setState(() {
+                    _selectedDueDateFilter = (val == null || val.isEmpty) ? null : val;
+                    _showTotal = false;
+                  });
+                },
+              );
+            }),
+          ],
+          Row(
+            children: [
+              Checkbox(
+                value: _includeDeletedCompanies,
+                onChanged: (bool? value) {
+                  setState(() {
+                    _includeDeletedCompanies = value ?? false;
+                    _showTotal = false;
+                  });
+                },
+              ),
+              const Text('Incluir facturas de empresas eliminadas'),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _isLoading ? null : _calculateReport,
+                  child: _isLoading ? const CircularProgressIndicator() : const Text('Calcular Total'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              if (_auth.currentUser != null) OutlinedButton(
+                onPressed: () async {
+                  final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+                  final exportService = ExportService(projectId);
+                  final selected = _selectedCompanies.entries
+                      .where((e) => e.value)
+                      .map((e) => e.key)
+                      .toList();
+
+                  String? exportStart;
+                  String? exportEnd;
+                  String exportRangeType = 'invoiceDate';
+
+                  if (_filterType == 'range') {
+                    exportStart = _startDate?.toIso8601String().split('T').first;
+                    exportEnd = _endDate?.toIso8601String().split('T').first;
+                    exportRangeType = _rangeType;
+                  } else if (_filterType == 'invoiceDate') {
+                    exportStart = _selectedInvoiceDateFilter;
+                    exportEnd = _selectedInvoiceDateFilter;
+                    exportRangeType = 'invoiceDate';
+                  } else if (_filterType == 'dueDate') {
+                    exportStart = _selectedDueDateFilter;
+                    exportEnd = _selectedDueDateFilter;
+                    exportRangeType = 'dueDate';
+                  }
+
+                  try {
+                    final result = await exportService.exportInvoicesToExcel(
+                      selectedCompanies: selected.isEmpty ? null : selected,
+                      startDate: exportStart,
+                      endDate: exportEnd,
+                      rangeType: exportRangeType,
+                      includeDeletedCompanies: _includeDeletedCompanies,
+                    );
+                    if (!mounted) return;
+                    if (result != null) {
+                      if (result.startsWith('ERROR:')) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(result))
+                        );
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Exportado: $result'))
+                        );
+                      }
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Error al exportar'))
+                      );
+                    }
+                  } catch (e) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Error al exportar: $e'))
+                    );
+                  }
+                },
+                child: const Text('Exportar Reporte'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _selectDate(BuildContext context, bool isStart) async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2101),
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStart) {
+          _startDate = picked;
+        } else {
+          _endDate = picked;
+        }
+        _showTotal = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _editAmountController.dispose();
+    _editInvoiceDateController.dispose();
+    _editDueDateController.dispose();
+    super.dispose();
+  }
+}
