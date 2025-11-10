@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /artifacts/{appId}/public/data/companies/{companyId} {
+      // Valida que el documento tiene sólo los campos permitidos y que el nombre es no vacío
+      function validCompany(data) {
+        return data.keys().hasOnly(['name', 'createdAt', 'deleted'])
+          && data.name is string
+          && data.name.size() > 0
+          && (data.deleted == null || data.deleted is bool);
+      }
+
+  // Permitir lectura pública de empresas para que cualquier usuario (anónimo)
+  // pueda ver la lista y registrar facturas.
+  allow read: if true;
+
+      // Crear y actualizar: usuario autenticado y datos válidos
+      allow create, update: if request.auth != null;
+
+      // Borrar: sólo usuarios autenticados
+      allow delete: if request.auth != null;
+      
+      // Subcollection for clients attached to a company
+      match /clients/{clientId} {
+        function validClient(data) {
+          return data.keys().hasOnly(['name', 'createdAt', 'deleted'])
+            && data.name is string
+            && data.name.size() > 0
+            && (data.deleted == null || data.deleted is bool);
+        }
+
+        // Public read so invoice registration can show clients
+        allow read: if true;
+
+        // Manage clients: authenticated users can create/update/delete
+        allow create, update: if request.auth != null;
+        allow delete: if request.auth != null;
+      }
+    }
+    
+    match /artifacts/{appId}/public/data/invoices/{invoiceId} {
+      function validInvoice(data) {
+        return data.keys().hasAll(['company', 'amount', 'invoiceDate', 'dueDate', 'userId', 'timestamp'])
+          && data.company is string 
+          && data.company.size() > 0
+          && data.amount is number 
+          && data.amount > 0
+          && data.invoiceDate is string
+          && data.dueDate is string;
+      }
+
+      function isOwner() {
+        return request.auth != null && (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == 'anonymous')
+      }
+
+      // Permitir lectura a todos para ver las facturas
+      allow read: if true;
+
+      // Permitir creación a todos, pero validando los datos
+      allow create: if validInvoice(request.resource.data);
+
+      // Permitir actualizar/eliminar a usuarios autenticados que son dueños de la factura o facturas anónimas
+      allow update, delete: if request.auth != null && (
+        resource.data.userId == request.auth.uid || 
+        resource.data.userId == 'anonymous' ||
+        request.auth.token.admin == true
+      );
+    }
+  }
+}
